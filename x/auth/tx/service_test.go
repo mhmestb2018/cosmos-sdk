@@ -19,11 +19,11 @@ import (
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/cosmos/cosmos-sdk/testutil"
 	"github.com/cosmos/cosmos-sdk/testutil/network"
+	"github.com/cosmos/cosmos-sdk/testutil/rest"
 	"github.com/cosmos/cosmos-sdk/testutil/testdata"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/types/query"
-	"github.com/cosmos/cosmos-sdk/types/rest"
 	"github.com/cosmos/cosmos-sdk/types/tx"
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
 	authclient "github.com/cosmos/cosmos-sdk/x/auth/client"
@@ -49,14 +49,15 @@ func (s *IntegrationTestSuite) SetupSuite() {
 
 	cfg := network.DefaultConfig()
 	cfg.NumValidators = 1
-
 	s.cfg = cfg
-	s.network = network.New(s.T(), cfg)
-	s.Require().NotNil(s.network)
+
+	var err error
+	s.network, err = network.New(s.T(), s.T().TempDir(), s.cfg)
+	s.Require().NoError(err)
 
 	val := s.network.Validators[0]
 
-	_, err := s.network.WaitForHeight(1)
+	_, err = s.network.WaitForHeight(1)
 	s.Require().NoError(err)
 
 	s.queryClient = tx.NewServiceClient(val.ClientCtx)
@@ -76,7 +77,7 @@ func (s *IntegrationTestSuite) SetupSuite() {
 		fmt.Sprintf("--%s=foobar", flags.FlagNote),
 	)
 	s.Require().NoError(err)
-	s.Require().NoError(val.ClientCtx.JSONCodec.UnmarshalJSON(out.Bytes(), &s.txRes))
+	s.Require().NoError(val.ClientCtx.Codec.UnmarshalJSON(out.Bytes(), &s.txRes))
 	s.Require().Equal(uint32(0), s.txRes.Code)
 
 	s.Require().NoError(s.network.WaitForNextBlock())
@@ -121,8 +122,15 @@ func (s IntegrationTestSuite) TestSimulateTx_GRPC() {
 			} else {
 				s.Require().NoError(err)
 				// Check the result and gas used are correct.
-				s.Require().Equal(len(res.GetResult().GetEvents()), 6) // 1 coin recv 1 coin spent, 1 transfer, 3 messages.
-				s.Require().True(res.GetGasInfo().GetGasUsed() > 0)    // Gas used sometimes change, just check it's not empty.
+				//
+				// The 13 events are:
+				// - Sending Fee to the pool: coin_spent, coin_received, transfer and message.sender=<val1>
+				// - tx.* events: tx.fee, tx.acc_seq, tx.signature
+				// - Sending Amount to recipient: coin_spent, coin_received, transfer and message.sender=<val1>
+				// - Msg events: message.module=bank and message.action=/cosmos.bank.v1beta1.MsgSend
+				s.Require().Equal(len(res.GetResult().GetEvents()), 13)
+				// Check the result and gas used are correct.
+				s.Require().True(res.GetGasInfo().GetGasUsed() > 0) // Gas used sometimes change, just check it's not empty.
 			}
 		})
 	}
@@ -151,7 +159,7 @@ func (s IntegrationTestSuite) TestSimulateTx_GRPCGateway() {
 
 	for _, tc := range testCases {
 		s.Run(tc.name, func() {
-			req, err := val.ClientCtx.JSONCodec.MarshalJSON(tc.req)
+			req, err := val.ClientCtx.Codec.MarshalJSON(tc.req)
 			s.Require().NoError(err)
 			res, err := rest.PostRequest(fmt.Sprintf("%s/cosmos/tx/v1beta1/simulate", val.APIAddress), "application/json", req)
 			s.Require().NoError(err)
@@ -159,11 +167,11 @@ func (s IntegrationTestSuite) TestSimulateTx_GRPCGateway() {
 				s.Require().Contains(string(res), tc.expErrMsg)
 			} else {
 				var result tx.SimulateResponse
-				err = val.ClientCtx.JSONCodec.UnmarshalJSON(res, &result)
+				err = val.ClientCtx.Codec.UnmarshalJSON(res, &result)
 				s.Require().NoError(err)
 				// Check the result and gas used are correct.
-				s.Require().Equal(len(result.GetResult().GetEvents()), 6) // 1 coin recv, 1 coin spent,1 transfer, 3 messages.
-				s.Require().True(result.GetGasInfo().GetGasUsed() > 0)    // Gas used sometimes change, just check it's not empty.
+				s.Require().Equal(len(result.GetResult().GetEvents()), 13) // See TestSimulateTx_GRPC for the 13 events.
+				s.Require().True(result.GetGasInfo().GetGasUsed() > 0)     // Gas used sometimes change, just check it's not empty.
 			}
 		})
 	}
@@ -313,7 +321,7 @@ func (s IntegrationTestSuite) TestGetTxEvents_GRPCGateway() {
 				s.Require().Contains(string(res), tc.expErrMsg)
 			} else {
 				var result tx.GetTxsEventResponse
-				err = val.ClientCtx.JSONCodec.UnmarshalJSON(res, &result)
+				err = val.ClientCtx.Codec.UnmarshalJSON(res, &result)
 				s.Require().NoError(err)
 				s.Require().GreaterOrEqual(len(result.Txs), 1)
 				s.Require().Equal("foobar", result.Txs[0].Body.Memo)
@@ -382,7 +390,7 @@ func (s IntegrationTestSuite) TestGetTx_GRPCGateway() {
 				s.Require().Contains(string(res), tc.expErrMsg)
 			} else {
 				var result tx.GetTxResponse
-				err = val.ClientCtx.JSONCodec.UnmarshalJSON(res, &result)
+				err = val.ClientCtx.Codec.UnmarshalJSON(res, &result)
 				s.Require().NoError(err)
 				s.Require().Equal("foobar", result.Tx.Body.Memo)
 				s.Require().NotZero(result.TxResponse.Height)
@@ -459,7 +467,7 @@ func (s IntegrationTestSuite) TestBroadcastTx_GRPCGateway() {
 
 	for _, tc := range testCases {
 		s.Run(tc.name, func() {
-			req, err := val.ClientCtx.JSONCodec.MarshalJSON(tc.req)
+			req, err := val.ClientCtx.Codec.MarshalJSON(tc.req)
 			s.Require().NoError(err)
 			res, err := rest.PostRequest(fmt.Sprintf("%s/cosmos/tx/v1beta1/txs", val.APIAddress), "application/json", req)
 			s.Require().NoError(err)
@@ -467,7 +475,7 @@ func (s IntegrationTestSuite) TestBroadcastTx_GRPCGateway() {
 				s.Require().Contains(string(res), tc.expErrMsg)
 			} else {
 				var result tx.BroadcastTxResponse
-				err = val.ClientCtx.JSONCodec.UnmarshalJSON(res, &result)
+				err = val.ClientCtx.Codec.UnmarshalJSON(res, &result)
 				s.Require().NoError(err)
 				s.Require().Equal(uint32(0), result.TxResponse.Code, "rawlog", result.TxResponse.RawLog)
 			}
